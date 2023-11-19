@@ -273,7 +273,7 @@ impl<T: ?Sized> Drop for RawBox<T> {
 
 /// Annotations that change that is displayed when the document is render.
 /// Also commonly called virtual text.
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 pub struct TextAnnotations<'a> {
     inline_annotations: Vec<Layer<'a, InlineAnnotation, Option<Highlight>>>,
     overlays: Vec<Layer<'a, Overlay, Option<Highlight>>>,
