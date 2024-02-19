@@ -43,7 +43,7 @@ pub use helix_core::diagnostic::Severity;
 use helix_core::{
     auto_pairs::AutoPairs,
     syntax::{self, AutoPairConfig, IndentationHeuristic, LanguageServerFeature, SoftWrap},
-    Change, LineEnding, Position, Selection, NATIVE_LINE_ENDING,
+    Change, LineEnding, Position, Range, Selection, NATIVE_LINE_ENDING,
 };
 use helix_dap as dap;
 use helix_lsp::lsp;
@@ -970,6 +970,8 @@ pub struct Editor {
     /// avoid calculating the cursor position multiple
     /// times during rendering and should not be set by other functions.
     pub handlers: Handlers,
+
+    pub mouse_down_range: Option<Range>,
     pub cursor_cache: CursorCache,
 }
 
@@ -1087,6 +1089,7 @@ impl Editor {
             needs_redraw: false,
             handlers,
             cursor_cache: CursorCache::default(),
+            mouse_down_range: None,
         }
     }
 
@@ -1977,7 +1980,7 @@ impl Editor {
 
     /// Switches the editor into normal mode.
     pub fn enter_normal_mode(&mut self) {
-        use helix_core::{graphemes, Range};
+        use helix_core::graphemes;
 
         if self.mode == Mode::Normal {
             return;
