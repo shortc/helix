@@ -3,6 +3,7 @@ pub(crate) mod lsp;
 pub(crate) mod typed;
 
 pub use dap::*;
+use helix_stdx::rope::{self, RopeSliceExt};
 use helix_vcs::Hunk;
 pub use lsp::*;
 use tui::widgets::Row;
@@ -19,7 +20,7 @@ use helix_core::{
     match_brackets,
     movement::{self, move_vertically_visual, Direction},
     object, pos_at_coords,
-    regex::{self, Regex, RegexBuilder},
+    regex::{self, Regex},
     search::{self, CharMatcher},
     selection, shellwords, surround,
     syntax::LanguageServerFeature,
@@ -1909,11 +1910,7 @@ fn split_selection(cx: &mut Context) {
 fn split_selection_on_newline(cx: &mut Context) {
     let (view, doc) = current!(cx.editor);
     let text = doc.text().slice(..);
-    // only compile the regex once
-    #[allow(clippy::trivial_regex)]
-    static REGEX: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"\r\n|[\n\r\u{000B}\u{000C}\u{0085}\u{2028}\u{2029}]").unwrap());
-    let selection = selection::split_on_matches(text, doc.selection(view.id), &REGEX);
+    let selection = selection::split_on_newline(text, doc.selection(view.id));
     doc.set_selection(view.id, selection);
 }
 
@@ -1932,8 +1929,7 @@ fn merge_consecutive_selections(cx: &mut Context) {
 #[allow(clippy::too_many_arguments)]
 fn search_impl(
     editor: &mut Editor,
-    contents: &str,
-    regex: &Regex,
+    regex: &rope::Regex,
     movement: Movement,
     direction: Direction,
     scrolloff: usize,
@@ -1961,23 +1957,20 @@ fn search_impl(
     // do a reverse search and wraparound to the end, we don't need to search
     // the text before the current cursor position for matches, but by slicing
     // it out, we need to add it back to the position of the selection.
-    let mut offset = 0;
+    let doc = doc!(editor).text().slice(..);
 
     // use find_at to find the next match after the cursor, loop around the end
     // Careful, `Regex` uses `bytes` as offsets, not character indices!
     let mut mat = match direction {
-        Direction::Forward => regex.find_at(contents, start),
-        Direction::Backward => regex.find_iter(&contents[..start]).last(),
+        Direction::Forward => regex.find(doc.regex_input_at_bytes(start..)),
+        Direction::Backward => regex.find_iter(doc.regex_input_at_bytes(..start)).last(),
     };
 
     if mat.is_none() {
         if wrap_around {
             mat = match direction {
-                Direction::Forward => regex.find(contents),
-                Direction::Backward => {
-                    offset = start;
-                    regex.find_iter(&contents[start..]).last()
-                }
+                Direction::Forward => regex.find(doc.regex_input()),
+                Direction::Backward => regex.find_iter(doc.regex_input_at_bytes(start..)).last(),
             };
         }
         if show_warnings {
@@ -1994,8 +1987,8 @@ fn search_impl(
     let selection = doc.selection(view.id);
 
     if let Some(mat) = mat {
-        let start = text.byte_to_char(mat.start() + offset);
-        let end = text.byte_to_char(mat.end() + offset);
+        let start = text.byte_to_char(mat.start());
+        let end = text.byte_to_char(mat.end());
 
         if end == 0 {
             // skip empty matches that don't make sense
@@ -2039,13 +2032,7 @@ fn searcher(cx: &mut Context, direction: Direction) {
     let scrolloff = config.scrolloff;
     let wrap_around = config.search.wrap_around;
 
-    let doc = doc!(cx.editor);
-
     // TODO: could probably share with select_on_matches?
-
-    // HAXX: sadly we can't avoid allocating a single string for the whole buffer since we can't
-    // feed chunks into the regex yet
-    let contents = doc.text().slice(..).to_string();
     let completions = search_completions(cx, Some(reg));
 
     ui::regex_prompt(
@@ -2067,7 +2054,6 @@ fn searcher(cx: &mut Context, direction: Direction) {
             }
             search_impl(
                 cx.editor,
-                &contents,
                 &regex,
                 Movement::Move,
                 direction,
@@ -2087,8 +2073,6 @@ fn search_next_or_prev_impl(cx: &mut Context, movement: Movement, direction: Dir
     let config = cx.editor.config();
     let scrolloff = config.scrolloff;
     if let Some(query) = cx.editor.registers.first(register, cx.editor) {
-        let doc = doc!(cx.editor);
-        let contents = doc.text().slice(..).to_string();
         let search_config = &config.search;
         let case_insensitive = if search_config.smart_case {
             !query.chars().any(char::is_uppercase)
@@ -2096,15 +2080,17 @@ fn search_next_or_prev_impl(cx: &mut Context, movement: Movement, direction: Dir
             false
         };
         let wrap_around = search_config.wrap_around;
-        if let Ok(regex) = RegexBuilder::new(&query)
-            .case_insensitive(case_insensitive)
-            .multi_line(true)
-            .build()
+        if let Ok(regex) = rope::RegexBuilder::new()
+            .syntax(
+                rope::Config::new()
+                    .case_insensitive(case_insensitive)
+                    .multi_line(true),
+            )
+            .build(&query)
         {
             for _ in 0..count {
                 search_impl(
                     cx.editor,
-                    &contents,
                     &regex,
                     movement,
                     direction,
@@ -2241,7 +2227,7 @@ fn global_search(cx: &mut Context) {
 
     let reg = cx.register.unwrap_or('/');
     let completions = search_completions(cx, Some(reg));
-    ui::regex_prompt(
+    ui::raw_regex_prompt(
         cx,
         "global-search:".into(),
         Some(reg),
@@ -2252,7 +2238,7 @@ fn global_search(cx: &mut Context) {
                 .map(|comp| (0.., std::borrow::Cow::Owned(comp.clone())))
                 .collect()
         },
-        move |cx, regex, event| {
+        move |cx, _, input, event| {
             if event != PromptEvent::Validate {
                 return;
             }
@@ -2267,7 +2253,7 @@ fn global_search(cx: &mut Context) {
 
             if let Ok(matcher) = RegexMatcherBuilder::new()
                 .case_smart(smart_case)
-                .build(regex.as_str())
+                .build(input)
             {
                 let search_root = helix_stdx::env::current_working_dir();
                 if !search_root.exists() {
